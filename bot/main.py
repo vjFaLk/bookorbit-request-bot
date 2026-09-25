@@ -181,6 +181,7 @@ def main() -> None:
     if missing := [k for k, v in env.items() if not v]:
         sys.exit(f"ERROR: missing environment variables: {', '.join(missing)}")
     logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=os.environ.get("LOG_LEVEL", "INFO").upper())
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines include the bot token in the URL
     ALLOWED_IDS.update(int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if x.strip())
 
     orbit = BookOrbit(env["BOOKORBIT_URL"], env["BOOKORBIT_USERNAME"], env["BOOKORBIT_PASSWORD"])
