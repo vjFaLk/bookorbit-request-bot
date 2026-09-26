@@ -20,6 +20,8 @@ Each request is a single message that updates in place as the status changes (se
 
 Add the bot to a group and list the group's ID in `ALLOWED_GROUP_IDS`. Group members can use `/download`, `/bind` and `/email`; `/request` and plain-text requests are reserved for the admins in `ALLOWED_USER_IDS`. Commands typed in the group get a 👀 reaction and the answer arrives in the user's DM, so the group stays quiet. Members of an allowed group can also DM the bot directly. Telegram only lets a bot message people who have started it, so each person has to open the bot and press Start once; the bot says so in the group if it can't reach them.
 
+Every request made by a non-admin is also reported to each admin in `ALLOWED_USER_IDS` by DM: who asked, which command, and the outcome.
+
 ### Email binding
 
 Recipients live in BookOrbit under the bot's user. `/bind you@kindle.com` creates (or updates) a recipient named `tg:<telegram id> <first name>`; `/email` looks that recipient up by the `tg:<id>` prefix, so no local storage is needed. Addresses ending in `@kindle.com` are created as Kindle devices. Emails are unique per account, so one address can only be bound to one Telegram user.

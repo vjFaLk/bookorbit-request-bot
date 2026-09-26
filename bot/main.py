@@ -13,7 +13,7 @@ import tempfile
 from difflib import SequenceMatcher
 from typing import Any
 
-from telegram import BotCommand, Chat, Update
+from telegram import BotCommand, Chat, Update, User
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -204,7 +204,20 @@ async def owned_book_id(candidate: dict[str, Any]) -> int | None:
         return None
 
 
-async def submit(query: str, deliver: str | None, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def notify_admins(user: User, deliver: str | None, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tell every admin what a non-admin just requested. Admins' own requests are not reported."""
+    if user.id in ALLOWED_IDS:
+        return
+    who = esc(user.full_name) + (f" @{esc(user.username)}" if user.username else "") + f" ({user.id})"
+    for admin_id in ALLOWED_IDS:
+        try:
+            await dm(context, admin_id, f"📣 {who} via /{deliver or 'request'}:\n{text}")
+        except TelegramError:
+            logger.warning("Could not notify admin %s", admin_id, exc_info=True)
+
+
+async def submit(query: str, deliver: str | None, user: User, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = user.id
     msg = await dm(context, user_id, f"🔍 {esc(query)}")
     try:
         candidates = await orbit.search(query)
@@ -215,7 +228,9 @@ async def submit(query: str, deliver: str | None, user_id: int, context: Context
         if book_id := await owned_book_id(best):
             # Already in the library: no request, deliver (or just say so) right away.
             item = {"title": best.get("title") or best.get("displayTitle"), "authors": best.get("authors"), "status": "available", "matchedBookId": book_id}
-            await edit(context, user_id, msg.message_id, describe(item) + "\n📚 Already in the library, no request filed.")
+            text = describe(item) + "\n📚 Already in the library, no request filed."
+            await edit(context, user_id, msg.message_id, text)
+            await notify_admins(user, deliver, text, context)
             if deliver:
                 context.application.create_task(deliver_book(item, user_id, msg.message_id, context, deliver))
             return
@@ -230,6 +245,7 @@ async def submit(query: str, deliver: str | None, user_id: int, context: Context
     if not done:
         text += "\n" + FOLLOWING[deliver]
     await edit(context, user_id, msg.message_id, text)
+    await notify_admins(user, deliver, text, context)
     if done:
         if deliver:
             context.application.create_task(deliver_book(item, user_id, msg.message_id, context, deliver))
@@ -309,7 +325,8 @@ async def download_book(item: dict[str, Any], book_id: int, user_id: int, contex
 
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE, deliver: str | None = None) -> None:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     titles = titles_from(update.effective_message.text or "")
     if not titles:
         await dm(context, user_id, "Send a title (one per line), e.g.\n/request Dune\nNeuromancer")
@@ -324,7 +341,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE, deliver: st
             return
     # ponytail: sequential and unbounded; cap if batches get large
     for title in titles:
-        await submit(title, deliver, user_id, context)
+        await submit(title, deliver, user, context)
 
 
 @guarded()
