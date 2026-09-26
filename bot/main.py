@@ -79,8 +79,7 @@ def guarded(members: bool = False):
                 await message.reply_text("⛔ Access denied.")
                 return
             if who == "member" and not members:
-                await message.reply_text("⛔ That's admin-only. Use /download or /email.")
-                return
+                return  # admin-only command: stay silent
             in_group = update.effective_chat.type != Chat.PRIVATE
             if in_group:
                 try:
@@ -372,20 +371,19 @@ async def bind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "📚 <b>BookOrbit Request Bot</b>\n\n"
-        "/request &lt;title&gt; — request a book and follow its progress (admins only)\n"
-        "/email &lt;title&gt; — request, then email it to your bound address once it lands\n"
-        "/download &lt;title&gt; — request, then send the file here once it lands\n"
+        "/download &lt;title&gt; &lt;author&gt; — request a book and get the file here once it lands\n"
+        "/email &lt;title&gt; &lt;author&gt; — request a book and email it to your bound address once it lands\n"
         "/bind &lt;email&gt; — bind your Kindle/email address for /email\n"
         "/help — this message\n\n"
-        "In a DM a plain message works like /request. One title per line requests several at once.\n"
-        "From a group, commands work too; I answer in your DM (start me here first).",
+        "Include the author for a better match, e.g. <code>/download 1984 George Orwell</code>. "
+        "One title per line requests several at once.\n"
+        "From a group, commands work too. I answer in your DM, so start me here first.",
         parse_mode=ParseMode.HTML,
     )
 
 
 async def post_init(app: Application) -> None:
     await app.bot.set_my_commands([
-        BotCommand("request", "Request a book"),
         BotCommand("email", "Request a book and email it when available"),
         BotCommand("download", "Request a book and send the file when available"),
         BotCommand("bind", "Bind your email address for /email"),
