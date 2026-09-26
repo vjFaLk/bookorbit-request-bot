@@ -9,5 +9,6 @@ services:
       BOOKORBIT_USERNAME: ""
       BOOKORBIT_PASSWORD: ""
       ALLOWED_USER_IDS: ""       # optional, comma-separated Telegram user IDs
+      ALLOWED_GROUP_IDS: ""      # optional, comma-separated Telegram group IDs; members may also DM the bot
       REQUEST_WAIT_MINUTES: "30" # optional, how long to follow a request
       LOG_LEVEL: "INFO"          # optional
