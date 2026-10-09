@@ -13,12 +13,12 @@ import tempfile
 from difflib import SequenceMatcher
 from typing import Any
 
-from telegram import BotCommand, Chat, Update, User
+from telegram import BotCommand, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from bot.bookorbit import BookOrbit, BookOrbitError, pick_best
+from bot.bookorbit import BookOrbit, BookOrbitError, rank
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ ALLOWED_IDS: set[int] = set()
 ALLOWED_GROUP_IDS: set[int] = set()
 WAIT_MINUTES = int(os.environ.get("REQUEST_WAIT_MINUTES", "30"))
 POLL_SECONDS = 15
+PICK_LIMIT = 5
 REVIEWER = "Wangla"
 TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024  # Bot API limit for send_document
 FORMAT_ORDER = ("epub", "kepub", "azw3", "mobi", "pdf", "cbz", "cbr")
@@ -112,9 +113,11 @@ async def dm(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str):
     return await context.bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML)
 
 
-async def edit(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str) -> None:
+async def edit(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+        )
     except BadRequest as exc:
         if "not modified" not in str(exc).lower():
             raise
@@ -198,6 +201,21 @@ def describe(item: dict[str, Any]) -> str:
     return text
 
 
+def picker(query: str, candidates: list[dict[str, Any]], message_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Numbered list of search results plus one button per number and a Cancel button."""
+    rows = []
+    for i, c in enumerate(candidates, 1):
+        authors = ", ".join(c.get("authors") or [])
+        extra = " · ".join(filter(None, [str(c.get("publishedYear") or ""), c.get("provider")]))
+        rows.append(f"{i}. <b>{esc(c.get('title') or c.get('displayTitle'))}</b>" + (f" — {esc(authors)}" if authors else "") + (f" ({esc(extra)})" if extra else ""))
+    text = f"🔍 <i>{esc(query)}</i> — pick one:\n" + "\n".join(rows)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(str(i), callback_data=f"pick:{message_id}:{i - 1}") for i in range(1, len(candidates) + 1)],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"pick:{message_id}:x")],
+    ])
+    return text, keyboard
+
+
 # -- request flow ------------------------------------------------------------
 
 
@@ -229,27 +247,38 @@ async def notify_admins(user: User, deliver: str | None, text: str, context: Con
 
 
 async def submit(query: str, deliver: str | None, user: User, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Search and show a picker; file_request() continues once the user taps a result."""
     user_id = user.id
     kind = media_kind(deliver)
     msg = await dm(context, user_id, f"🔍 {esc(query)}")
     try:
-        candidates = await orbit.search(query, kind)
-        if not candidates:
-            await edit(context, user_id, msg.message_id, f"📭 No metadata found for <i>{esc(query)}</i>.")
-            return
-        best = pick_best(query, candidates)
+        candidates = rank(query, await orbit.search(query, kind), PICK_LIMIT)
+    except BookOrbitError as exc:
+        await edit(context, user_id, msg.message_id, f"❌ {esc(exc)}")
+        return
+    if not candidates:
+        await edit(context, user_id, msg.message_id, f"📭 No metadata found for <i>{esc(query)}</i>.")
+        return
+    # ponytail: ignored pickers are never evicted; cap or TTL if memory shows up
+    context.user_data[msg.message_id] = {"candidates": candidates, "deliver": deliver}
+    await edit(context, user_id, msg.message_id, *picker(query, candidates, msg.message_id))
+
+
+async def file_request(best: dict[str, Any], deliver: str | None, user: User, message_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id, kind = user.id, media_kind(deliver)
+    try:
         if book_id := await owned_book_id(best, kind):
             # Already in the library: no request, deliver (or just say so) right away.
             item = {"title": best.get("title") or best.get("displayTitle"), "authors": best.get("authors"), "status": "available", "matchedBookId": book_id}
             text = describe(item) + "\n📚 Already in the library, no request filed."
-            await edit(context, user_id, msg.message_id, text)
+            await edit(context, user_id, message_id, text)
             await notify_admins(user, deliver, text, context)
             if deliver:
-                context.application.create_task(deliver_book(item, user_id, msg.message_id, context, deliver))
+                context.application.create_task(deliver_book(item, user_id, message_id, context, deliver))
             return
         result = await orbit.create_request(best, kind)
     except BookOrbitError as exc:
-        await edit(context, user_id, msg.message_id, f"❌ {esc(exc)}")
+        await edit(context, user_id, message_id, f"❌ {esc(exc)}")
         return
 
     item = result["request"]
@@ -257,13 +286,28 @@ async def submit(query: str, deliver: str | None, user: User, context: ContextTy
     done = item["status"] in TERMINAL
     if not done:
         text += "\n" + FOLLOWING[deliver]
-    await edit(context, user_id, msg.message_id, text)
+    await edit(context, user_id, message_id, text)
     await notify_admins(user, deliver, text, context)
     if done:
         if deliver:
-            context.application.create_task(deliver_book(item, user_id, msg.message_id, context, deliver))
+            context.application.create_task(deliver_book(item, user_id, message_id, context, deliver))
     else:
-        context.application.create_task(follow_request(item["id"], item["status"], user_id, msg.message_id, context, deliver))
+        context.application.create_task(follow_request(item["id"], item["status"], user_id, message_id, context, deliver))
+
+
+async def pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Button tap on a picker: 'pick:<message_id>:<index|x>'."""
+    query = update.callback_query
+    await query.answer()
+    _, message_id, choice = query.data.split(":")
+    message_id, user = int(message_id), update.effective_user
+    state = context.user_data.pop(message_id, None)
+    if state is None:
+        await edit(context, user.id, message_id, "⌛ That choice expired, send the title again.")
+    elif choice == "x":
+        await edit(context, user.id, message_id, "🚫 Cancelled.")
+    else:
+        await file_request(state["candidates"][int(choice)], state["deliver"], user, message_id, context)
 
 
 async def follow_request(
@@ -469,6 +513,7 @@ def main() -> None:
     app.add_handler(CommandHandler("comic", comic_command))
     app.add_handler(CommandHandler("bind", bind_command))
     app.add_handler(CommandHandler(["help", "start"], help_command))
+    app.add_handler(CallbackQueryHandler(pick_callback, pattern=r"^pick:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, request_command))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

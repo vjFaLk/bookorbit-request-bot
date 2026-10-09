@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from difflib import SequenceMatcher
 from typing import Any, Iterable
@@ -37,8 +38,15 @@ def sse_events(lines: Iterable[str]) -> Iterable[tuple[str | None, str]]:
         yield event, "\n".join(data)
 
 
-def pick_best(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    """Closest title match to the query; ISBN-bearing candidates win ties."""
+def _key(c: dict[str, Any]) -> tuple[str, str]:
+    title = c.get("title") or c.get("displayTitle") or ""
+    author = (c.get("authors") or [""])[0] or ""
+    return (re.sub(r"[^\w]+", " ", title.lower()).strip(), author.lower().strip())
+
+
+def rank(query: str, candidates: list[dict[str, Any]], n: int = 5) -> list[dict[str, Any]]:
+    """Top `n` candidates by title similarity, best first; ISBN-bearing candidates win ties and the same
+    title+author from several providers collapses into its best row."""
     q = query.lower()
 
     def score(c: dict[str, Any]) -> tuple[float, bool]:
@@ -49,7 +57,10 @@ def pick_best(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
             bool(c.get("isbn13")),
         )
 
-    return max(candidates, key=score)
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for c in sorted(candidates, key=score, reverse=True):
+        out.setdefault(_key(c), c)
+    return list(out.values())[:n]
 
 
 class BookOrbit:

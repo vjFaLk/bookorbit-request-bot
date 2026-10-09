@@ -1,7 +1,7 @@
 """Smallest checks that fail if the pure logic breaks. Run: python test_bot.py"""
 
-from bot.bookorbit import pick_best, sse_events
-from bot.main import COMIC_FORMATS, bound_recipient, describe, device_type, find_owned, link_book, media_kind, norm, pick_file, titles_from
+from bot.bookorbit import rank, sse_events
+from bot.main import COMIC_FORMATS, bound_recipient, describe, device_type, find_owned, link_book, media_kind, norm, pick_file, picker, titles_from
 
 
 def test_titles_from():
@@ -16,14 +16,26 @@ def test_sse_events():
     assert list(sse_events(raw.splitlines())) == [("provider-status", '{"provider":"google"}'), (None, '{"title":"Dune"}')]
 
 
-def test_pick_best():
+def test_rank():
     c = [
-        {"title": "Dune Messiah", "authors": ["Frank Herbert"]},
-        {"title": "Dune", "authors": ["Frank Herbert"]},
-        {"title": "Dune", "authors": ["Frank Herbert"], "isbn13": "9780441013593"},
+        {"title": "Dune Messiah", "authors": ["Frank Herbert"], "provider": "google"},
+        {"title": "Dune", "authors": ["Frank Herbert"], "provider": "openlibrary"},
+        {"title": "Dune", "authors": ["Frank Herbert"], "isbn13": "9780441013593", "provider": "google"},
+        {"title": "Dune: Graphic Novel", "authors": ["Brian Herbert"], "provider": "google"},
     ]
-    assert pick_best("Dune", c)["isbn13"] == "9780441013593"
-    assert pick_best("Dune Messiah", c)["title"] == "Dune Messiah"
+    top = rank("Dune", c)
+    assert [t["title"] for t in top] == ["Dune", "Dune Messiah", "Dune: Graphic Novel"]  # duplicate Dune collapsed
+    assert top[0]["isbn13"] == "9780441013593"  # ISBN wins the tie inside the duplicate group
+    assert rank("Dune Messiah", c)[0]["title"] == "Dune Messiah"
+    assert len(rank("Dune", c, n=2)) == 2
+
+
+def test_picker():
+    text, kb = picker("dune", [{"title": "Dune", "authors": ["Frank Herbert"], "publishedYear": 1965, "provider": "google"}, {"title": "Dune Messiah"}], 42)
+    assert "1. <b>Dune</b> — Frank Herbert (1965 · google)" in text and "2. <b>Dune Messiah</b>" in text
+    rows = kb.inline_keyboard
+    assert [b.callback_data for b in rows[0]] == ["pick:42:0", "pick:42:1"]
+    assert rows[1][0].callback_data == "pick:42:x"
 
 
 def test_bound_recipient():
