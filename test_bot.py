@@ -32,7 +32,7 @@ def test_rank():
 
 def test_picker():
     text, kb = picker("dune", [{"title": "Dune", "authors": ["Frank Herbert"], "publishedYear": 1965, "provider": "google"}, {"title": "Dune Messiah"}], 42)
-    assert "1. <b>Dune</b> — Frank Herbert (1965 · google)" in text and "2. <b>Dune Messiah</b>" in text
+    assert "1. <b>Dune</b> — Frank Herbert (1965)" in text and "2. <b>Dune Messiah</b>" in text and "google" not in text
     rows = kb.inline_keyboard
     assert [b.callback_data for b in rows[0]] == ["pick:42:0", "pick:42:1"]
     assert rows[1][0].callback_data == "pick:42:x"

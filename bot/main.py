@@ -206,8 +206,8 @@ def picker(query: str, candidates: list[dict[str, Any]], message_id: int) -> tup
     rows = []
     for i, c in enumerate(candidates, 1):
         authors = ", ".join(c.get("authors") or [])
-        extra = " · ".join(filter(None, [str(c.get("publishedYear") or ""), c.get("provider")]))
-        rows.append(f"{i}. <b>{esc(c.get('title') or c.get('displayTitle'))}</b>" + (f" — {esc(authors)}" if authors else "") + (f" ({esc(extra)})" if extra else ""))
+        year = c.get("publishedYear")
+        rows.append(f"{i}. <b>{esc(c.get('title') or c.get('displayTitle'))}</b>" + (f" — {esc(authors)}" if authors else "") + (f" ({year})" if year else ""))
     text = f"🔍 <i>{esc(query)}</i> — pick one:\n" + "\n".join(rows)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(str(i), callback_data=f"pick:{message_id}:{i - 1}") for i in range(1, len(candidates) + 1)],
@@ -247,7 +247,7 @@ async def notify_admins(user: User, deliver: str | None, text: str, context: Con
 
 
 async def submit(query: str, deliver: str | None, user: User, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Search and show a picker; file_request() continues once the user taps a result."""
+    """Search, then file the best match; /comic shows a picker and file_request() continues on tap."""
     user_id = user.id
     kind = media_kind(deliver)
     msg = await dm(context, user_id, f"🔍 {esc(query)}")
@@ -258,6 +258,9 @@ async def submit(query: str, deliver: str | None, user: User, context: ContextTy
         return
     if not candidates:
         await edit(context, user_id, msg.message_id, f"📭 No metadata found for <i>{esc(query)}</i>.")
+        return
+    if deliver != "comic":
+        await file_request(candidates[0], deliver, user, msg.message_id, context)
         return
     # ponytail: ignored pickers are never evicted; cap or TTL if memory shows up
     context.user_data[msg.message_id] = {"candidates": candidates, "deliver": deliver}

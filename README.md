@@ -6,10 +6,10 @@ A Telegram bot that files book and comic requests in your [BookOrbit](https://gi
 
 | Command | What it does |
 | --- | --- |
-| `/request <title>` | Admins only. Searches BookOrbit's metadata providers for the title, shows the top matches with a button each, files a request for the one you tap, and reports each status change (searching, downloading, available, failed…). Cancel discards the search. |
+| `/request <title>` | Admins only. Searches BookOrbit's metadata providers for the title, files a request for the best match, and reports each status change (searching, downloading, available, failed…). |
 | `/email <title>` | Same as `/request`, then waits for the book to become available and emails it to the address you bound with `/bind`. |
 | `/download <title>` | Same as `/request`, then sends the e-book file to you in Telegram (files up to 50 MB, Telegram's bot limit). |
-| `/comic <series> #<issue>` | Searches BookOrbit's comic metadata providers (ComicVine) for the title, files a *comic* request, and once it is available shares the link to the comic on BookOrbit (`<BOOKORBIT_URL>/book/<id>`). Comics are never emailed or uploaded to Telegram, their files are usually too large. |
+| `/comic <series> #<issue>` | Searches BookOrbit's comic metadata providers (ComicVine) for the title, shows the top matches with a button each, files a *comic* request for the one you tap (Cancel discards the search), and once it is available shares the link to the comic on BookOrbit (`<BOOKORBIT_URL>/book/<id>`). Comics are never emailed or uploaded to Telegram, their files are usually too large. |
 | `/bind <email>` | Binds your Kindle/email address to your Telegram account for `/email`. `/bind` alone shows the current binding. |
 | `/help` | Shows help. |
 
@@ -89,7 +89,7 @@ TELEGRAM_BOT_TOKEN=... BOOKORBIT_URL=... BOOKORBIT_USERNAME=... BOOKORBIT_PASSWO
 
 ## How it works
 
-1. `GET /api/v1/metadata-fetch/stream?title=…&mediaKind=ebook` (or `mediaKind=comic` for `/comic`) streams metadata candidates. The bot ranks them by title similarity (ISBN-bearing candidates break ties), collapses the same title and author from several providers into one row, and shows the top 5 with a button each. Nothing is filed until you tap one; Cancel discards the search.
+1. `GET /api/v1/metadata-fetch/stream?title=…&mediaKind=ebook` (or `mediaKind=comic` for `/comic`) streams metadata candidates. The bot ranks them by title similarity (ISBN-bearing candidates break ties), collapses the same title and author from several providers into one row, and files the best one. `/comic` instead shows the top 5 with a button each, since issue and series matches are ambiguous; nothing is filed until you tap one and Cancel discards the search.
 2. `POST /api/v1/book-requests/availability` checks whether that book is already in the library (ISBN13, then exact title + author). If that finds nothing, `GET /api/v1/books/search` runs on the candidate's title with author names and punctuation stripped, and a near-identical title with an agreeing author counts as owned. If the book is owned, no request is filed: `/request` says so, `/email` and `/download` deliver the existing book straight away, `/comic` shares its link. For comics only a library row with a comic file (cbz, cbr, cb7, cbx) counts as owned. BookOrbit's own check on request creation only runs when the user has "Let this user see books they requested" ticked, which is why the bot asks first.
 3. `POST /api/v1/book-requests` files the request with that candidate's title, authors, ISBNs and provider IDs, so BookOrbit's release scoring has something to match against.
 4. The bot polls `GET /api/v1/book-requests/:id` until the status settles, editing its message on each change.
