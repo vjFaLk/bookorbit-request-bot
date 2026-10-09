@@ -1,7 +1,7 @@
 """Smallest checks that fail if the pure logic breaks. Run: python test_bot.py"""
 
 from bot.bookorbit import pick_best, sse_events
-from bot.main import bound_recipient, describe, device_type, find_owned, norm, pick_file, titles_from
+from bot.main import COMIC_FORMATS, bound_recipient, describe, device_type, find_owned, link_book, media_kind, norm, pick_file, titles_from
 
 
 def test_titles_from():
@@ -66,6 +66,26 @@ def test_find_owned():
     assert find_owned(cand, [{"id": 5, "title": "1984", "authors": []}])["id"] == 5  # no author/format info: accept
     assert find_owned({"title": "", "authors": []}, lib) is None
     assert find_owned({"title": "Animal Farm", "authors": ["George Orwell"]}, lib) is None
+
+
+def test_find_owned_comic():
+    cand = {"title": "Saga #1", "authors": ["Brian K. Vaughan"]}
+    cbz = [{"id": 1, "title": "Saga #1", "authors": ["Brian K. Vaughan"], "formats": ["cbz"]}]
+    epub = [{"id": 2, "title": "Saga #1", "authors": ["Brian K. Vaughan"], "formats": ["epub"]}]
+    assert find_owned(cand, cbz, formats=COMIC_FORMATS)["id"] == 1
+    assert find_owned(cand, epub, formats=COMIC_FORMATS) is None      # an e-book is not an owned comic
+    assert find_owned(cand, [{"id": 3, "title": "Saga #1", "formats": ["cb7"]}], formats=COMIC_FORMATS)["id"] == 3
+
+
+def test_media_kind():
+    assert media_kind("comic") == "comic"
+    assert media_kind("download") == "ebook"
+    assert media_kind(None) == "ebook"
+
+
+def test_link_book():
+    text = link_book({"title": "Saga #1", "status": "available", "matchedBookId": 7}, 7, "http://orbit.local:3000/")
+    assert text.endswith("http://orbit.local:3000/book/7")
 
 
 def test_describe_without_request_id():

@@ -30,18 +30,26 @@ POLL_SECONDS = 15
 REVIEWER = "Wangla"
 TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024  # Bot API limit for send_document
 FORMAT_ORDER = ("epub", "kepub", "azw3", "mobi", "pdf", "cbz", "cbr")
+COMIC_FORMATS = ("cbz", "cbr", "cb7", "cbx")  # BookOrbit's COMIC_FORMAT_LIST
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 BIND_HINT = "No email bound to your Telegram account. Send <code>/bind you@kindle.com</code> first."
 FOLLOWING = {
     None: f"⏳ Following for up to {WAIT_MINUTES} min.",
     "email": f"⏳ Following for up to {WAIT_MINUTES} min, will email when available.",
     "download": f"⏳ Following for up to {WAIT_MINUTES} min, will send the file when available.",
+    "comic": f"⏳ Following for up to {WAIT_MINUTES} min, will share the link when available.",
 }
+BOOKORBIT_URL = ""  # public base of the BookOrbit web app, for /comic links
 orbit: BookOrbit
 
 
 def esc(s: Any) -> str:
     return html.escape(str(s or ""))
+
+
+def media_kind(deliver: str | None) -> str:
+    """BookOrbit mediaKind for a delivery mode: /comic files comics, everything else e-books."""
+    return "comic" if deliver == "comic" else "ebook"
 
 
 # -- access ------------------------------------------------------------------
@@ -147,9 +155,12 @@ def norm(text: Any, authors: list[str] | None = None) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", t).split())
 
 
-def find_owned(candidate: dict[str, Any], books: list[dict[str, Any]], threshold: float = 0.9) -> dict[str, Any] | None:
+def find_owned(
+    candidate: dict[str, Any], books: list[dict[str, Any]], threshold: float = 0.9, formats: tuple[str, ...] = FORMAT_ORDER
+) -> dict[str, Any] | None:
     """Library book whose normalised title is near-identical to the candidate's. When both sides name
-    authors one must agree; when the search row lists formats, one must be an e-book format."""
+    authors one must agree; when the search row lists formats, one must be in `formats` (e-book formats
+    by default, COMIC_FORMATS for comics)."""
     title = norm(candidate.get("title") or candidate.get("displayTitle"), candidate.get("authors"))
     authors = [norm(a) for a in candidate.get("authors") or [] if a]
     if not title:
@@ -159,8 +170,8 @@ def find_owned(candidate: dict[str, Any], books: list[dict[str, Any]], threshold
         b_authors = [norm(a) for a in b.get("authors") or [] if a]
         if authors and b_authors and not any(SequenceMatcher(None, x, y).ratio() >= 0.8 for x in authors for y in b_authors):
             return 0.0
-        formats = b.get("formats")
-        if isinstance(formats, list) and not any(str(f or "").lower() in FORMAT_ORDER for f in formats):
+        b_formats = b.get("formats")
+        if isinstance(b_formats, list) and not any(str(f or "").lower() in formats for f in b_formats):
             return 0.0
         return SequenceMatcher(None, title, norm(b.get("title"), b.get("authors"))).ratio()
 
@@ -190,14 +201,15 @@ def describe(item: dict[str, Any]) -> str:
 # -- request flow ------------------------------------------------------------
 
 
-async def owned_book_id(candidate: dict[str, Any]) -> int | None:
+async def owned_book_id(candidate: dict[str, Any], kind: str = "ebook") -> int | None:
     """Library check before filing: BookOrbit's exact ISBN13/title match, then a fuzzy pass over a
     library search for the cleaned title. A failed check never blocks a request."""
     try:
-        if book_id := await orbit.owned_book_id(candidate):
+        if book_id := await orbit.owned_book_id(candidate, kind):
             return book_id
         q = norm(candidate.get("title") or candidate.get("displayTitle"), candidate.get("authors")) or (candidate.get("authors") or [""])[0]
-        owned = find_owned(candidate, await orbit.search_library(q)) if q else None
+        formats = COMIC_FORMATS if kind == "comic" else FORMAT_ORDER
+        owned = find_owned(candidate, await orbit.search_library(q), formats=formats) if q else None
         return owned["id"] if owned else None
     except BookOrbitError:
         logger.warning("Availability check failed for %r", candidate.get("title"), exc_info=True)
@@ -218,14 +230,15 @@ async def notify_admins(user: User, deliver: str | None, text: str, context: Con
 
 async def submit(query: str, deliver: str | None, user: User, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = user.id
+    kind = media_kind(deliver)
     msg = await dm(context, user_id, f"🔍 {esc(query)}")
     try:
-        candidates = await orbit.search(query)
+        candidates = await orbit.search(query, kind)
         if not candidates:
             await edit(context, user_id, msg.message_id, f"📭 No metadata found for <i>{esc(query)}</i>.")
             return
         best = pick_best(query, candidates)
-        if book_id := await owned_book_id(best):
+        if book_id := await owned_book_id(best, kind):
             # Already in the library: no request, deliver (or just say so) right away.
             item = {"title": best.get("title") or best.get("displayTitle"), "authors": best.get("authors"), "status": "available", "matchedBookId": book_id}
             text = describe(item) + "\n📚 Already in the library, no request filed."
@@ -234,7 +247,7 @@ async def submit(query: str, deliver: str | None, user: User, context: ContextTy
             if deliver:
                 context.application.create_task(deliver_book(item, user_id, msg.message_id, context, deliver))
             return
-        result = await orbit.create_request(best)
+        result = await orbit.create_request(best, kind)
     except BookOrbitError as exc:
         await edit(context, user_id, msg.message_id, f"❌ {esc(exc)}")
         return
@@ -278,18 +291,25 @@ async def follow_request(
 
 
 async def deliver_book(item: dict[str, Any], chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
-    """Email the matched book to the user's bound recipient, or send it as a Telegram document."""
+    """Email the matched book to the user's bound recipient, send it as a Telegram document, or (comics) link to it."""
     book_id = item.get("matchedBookId")
     if item.get("status") != "available":
         text = f"⚠️ Not sending {describe(item)}\nIt never became available."
     elif not book_id:
         text = f"⚠️ {describe(item)}\nIt was fulfilled outside the library, so I can't fetch the file. Ask {REVIEWER}."
+    elif mode == "comic":
+        text = link_book(item, book_id)
     else:
         try:
             text = await (email_book if mode == "email" else download_book)(item, book_id, chat_id, context)
         except BookOrbitError as exc:
             text = f"❌ {'Email' if mode == 'email' else 'Download'} failed for {describe(item)}\n{esc(exc)}"
     await edit(context, chat_id, message_id, text)
+
+
+def link_book(item: dict[str, Any], book_id: int, base_url: str | None = None) -> str:
+    """Comics are neither emailed nor uploaded (files are often above Telegram's limit): share the book page."""
+    return f"🔗 {describe(item)}\n{esc((base_url if base_url is not None else BOOKORBIT_URL).rstrip('/'))}/book/{book_id}"
 
 
 async def email_book(item: dict[str, Any], book_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -329,7 +349,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE, deliver: st
     user_id = user.id
     titles = titles_from(update.effective_message.text or "")
     if not titles:
-        await dm(context, user_id, "Send a title (one per line), e.g.\n/request Dune\nNeuromancer")
+        example = "/comic Saga #1\nMonstress #1" if deliver == "comic" else "/request Dune\nNeuromancer"
+        await dm(context, user_id, f"Send a title (one per line), e.g.\n{example}")
         return
     if deliver == "email":
         try:
@@ -357,6 +378,11 @@ async def email_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @guarded(members=True)
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await handle(update, context, deliver="download")
+
+
+@guarded(members=True)
+async def comic_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await handle(update, context, deliver="comic")
 
 
 @guarded(members=True)
@@ -390,9 +416,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "📚 <b>BookOrbit Request Bot</b>\n\n"
         "/download &lt;title&gt; &lt;author&gt; — request a book and get the file here once it lands\n"
         "/email &lt;title&gt; &lt;author&gt; — request a book and email it to your bound address once it lands\n"
+        "/comic &lt;series&gt; #&lt;issue&gt; — request a comic and get a link to it on BookOrbit once it lands\n"
         "/bind &lt;email&gt; — bind your Kindle/email address for /email\n"
         "/help — this message\n\n"
-        "Include the author for a better match, e.g. <code>/download 1984 George Orwell</code>. "
+        "Include the author for a better match, e.g. <code>/download 1984 George Orwell</code>; "
+        "for comics the issue number, e.g. <code>/comic Saga #1</code>. Comics are linked, not sent as files. "
         "One title per line requests several at once.\n"
         "From a group, commands work too. I answer in your DM, so start me here first.",
         parse_mode=ParseMode.HTML,
@@ -403,6 +431,7 @@ async def post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("email", "Request a book and email it when available"),
         BotCommand("download", "Request a book and send the file when available"),
+        BotCommand("comic", "Request a comic and share its link when available"),
         BotCommand("bind", "Bind your email address for /email"),
         BotCommand("help", "Show help"),
     ])
@@ -417,7 +446,7 @@ def ids(var: str) -> set[int]:
 
 
 def main() -> None:
-    global orbit
+    global orbit, BOOKORBIT_URL
     env = {k: os.environ.get(k, "") for k in ("TELEGRAM_BOT_TOKEN", "BOOKORBIT_URL", "BOOKORBIT_USERNAME", "BOOKORBIT_PASSWORD")}
     if missing := [k for k, v in env.items() if not v]:
         sys.exit(f"ERROR: missing environment variables: {', '.join(missing)}")
@@ -426,6 +455,7 @@ def main() -> None:
     ALLOWED_IDS.update(ids("ALLOWED_USER_IDS"))
     ALLOWED_GROUP_IDS.update(ids("ALLOWED_GROUP_IDS"))
 
+    BOOKORBIT_URL = env["BOOKORBIT_URL"].rstrip("/")
     orbit = BookOrbit(env["BOOKORBIT_URL"], env["BOOKORBIT_USERNAME"], env["BOOKORBIT_PASSWORD"])
     logger.info(
         "BookOrbit: %s · allowed users: %s · allowed groups: %s",
@@ -436,6 +466,7 @@ def main() -> None:
     app.add_handler(CommandHandler("request", request_command))
     app.add_handler(CommandHandler("email", email_command))
     app.add_handler(CommandHandler("download", download_command))
+    app.add_handler(CommandHandler("comic", comic_command))
     app.add_handler(CommandHandler("bind", bind_command))
     app.add_handler(CommandHandler(["help", "start"], help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, request_command))
